@@ -1,0 +1,25 @@
+name: olune-hbbs release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build hbbs/hbbr (x86_64 linux, glibc)
+        run: cargo build --release --bin hbbs --bin hbbr
+      - name: Package
+        run: |
+          mkdir -p out && cp target/release/hbbs target/release/hbbr out/
+          cd out && sha256sum hbbs hbbr > SHA256SUMS && tar -czf olune-hbbs-linux-amd64.tar.gz hbbs hbbr SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            out/olune-hbbs-linux-amd64.tar.gz
+            out/SHA256SUMS

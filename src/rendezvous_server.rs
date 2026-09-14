@@ -495,6 +495,19 @@ impl RendezvousServer {
                     if let Some(sink) = sink.take() {
                         self.tcp_punch.lock().await.insert(try_into_v4(addr), sink);
                     }
+                    // OLUNE ACCESS: mesmo critério do punch hole para o caminho via relay.
+                    if let crate::olune_gate::Verdict::Deny(reason) =
+                        crate::olune_gate::check(&rf.token, &rf.id).await
+                    {
+                        log::warn!("olune gate: relay recusado {} -> {}: {}", addr, rf.id, reason);
+                        let mut msg_out = RendezvousMessage::new();
+                        msg_out.set_relay_response(RelayResponse {
+                            refuse_reason: reason,
+                            ..Default::default()
+                        });
+                        allow_err!(self.send_to_tcp_sync(msg_out, addr).await);
+                        return true;
+                    }
                     if let Some(peer) = self.pm.get_in_memory(&rf.id).await {
                         let mut msg_out = RendezvousMessage::new();
                         rf.socket_addr = AddrMangle::encode(addr).into();
@@ -684,6 +697,19 @@ impl RendezvousServer {
             let mut msg_out = RendezvousMessage::new();
             msg_out.set_punch_hole_response(PunchHoleResponse {
                 failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+                ..Default::default()
+            });
+            return Ok((msg_out, None));
+        }
+        // OLUNE ACCESS: o controlador precisa de um convite válido para este computador.
+        if let crate::olune_gate::Verdict::Deny(reason) =
+            crate::olune_gate::check(&ph.token, &ph.id).await
+        {
+            log::warn!("olune gate: recusado {} -> {}: {}", addr, ph.id, reason);
+            let mut msg_out = RendezvousMessage::new();
+            msg_out.set_punch_hole_response(PunchHoleResponse {
+                failure: punch_hole_response::Failure::LICENSE_MISMATCH.into(),
+                other_failure: reason,
                 ..Default::default()
             });
             return Ok((msg_out, None));
