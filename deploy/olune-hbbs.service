@@ -1,0 +1,18 @@
+[Unit]
+Description=Olune Remote hbbs (rendezvous + gate de convites)
+After=network-online.target olune-access.service
+Wants=network-online.target olune-access.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/olune-server/data
+Environment=OLUNE_ACCESS_DB=/opt/olune-server/data/olune-access.sqlite3
+ExecStartPre=/opt/olune-server/refresh-host.sh
+ExecStart=/bin/bash -c 'set -a; . /opt/olune-server/.env; exec /opt/olune-server/bin/hbbs -r "${OLUNE_PUBLIC_HOST}:21117" -k _'
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

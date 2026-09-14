@@ -1,0 +1,16 @@
+[Unit]
+Description=Olune Remote hbbr (relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/olune-server/data
+ExecStart=/opt/olune-server/bin/hbbr -k _
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Olune Access (convites, cotas, suspensão)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=OLUNE_DATA_DIR=/opt/olune-server/data
+Environment=OLUNE_ENV=/opt/olune-server/.env
+ExecStart=/usr/bin/python3 /opt/olune-access/olune_access.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

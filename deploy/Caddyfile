@@ -1,0 +1,10 @@
+# TLS automatico (Let's Encrypt) para o nome sslip.io do IP fixo. __HOST__ e trocado pelo install.sh.
+__HOST__ {
+    encode gzip
+    reverse_proxy 127.0.0.1:21121
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+}
