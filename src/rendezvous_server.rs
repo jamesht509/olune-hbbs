@@ -16,7 +16,7 @@ use hbb_common::{
         register_pk_response::Result::{TOO_FREQUENT, UUID_MISMATCH},
         *,
     },
-    tcp::{listen_any, FramedStream},
+    tcp::{listen_any, Encrypt, FramedStream},
     timeout,
     tokio::{
         self,
@@ -31,7 +31,7 @@ use hbb_common::{
     AddrMangle, ResultType,
 };
 use ipnetwork::Ipv4Network;
-use sodiumoxide::crypto::sign;
+use sodiumoxide::crypto::{box_, secretbox, sign};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -51,7 +51,8 @@ const REG_TIMEOUT: i64 = 30_000;
 type TcpStreamSink = SplitSink<Framed<TcpStream, BytesCodec>, Bytes>;
 type WsSink = SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, tungstenite::Message>;
 enum Sink {
-    TcpStream(TcpStreamSink),
+    // OLUNE: o segundo campo guarda o estado de cifra do canal "secure tcp" (KeyExchange), quando negociado.
+    TcpStream(TcpStreamSink, Option<Encrypt>),
     Ws(WsSink),
 }
 type Sender = mpsc::UnboundedSender<Data>;
@@ -849,7 +850,11 @@ impl RendezvousServer {
         if let Some(sink) = sink.as_mut() {
             if let Ok(bytes) = msg.write_to_bytes() {
                 match sink {
-                    Sink::TcpStream(s) => {
+                    Sink::TcpStream(s, enc) => {
+                        let bytes = match enc.as_mut() {
+                            Some(enc) => enc.enc(&bytes),
+                            None => bytes,
+                        };
                         allow_err!(s.send(Bytes::from(bytes)).await);
                     }
                     Sink::Ws(ws) => {
@@ -1203,9 +1208,42 @@ impl RendezvousServer {
                 }
             }
         } else {
-            let (a, mut b) = Framed::new(stream, BytesCodec::new()).split();
-            sink = Some(Sink::TcpStream(a));
-            while let Ok(Some(Ok(bytes))) = timeout(30_000, b.next()).await {
+            let mut framed = Framed::new(stream, BytesCodec::new());
+            // OLUNE: handshake "secure tcp" (KeyExchange), o mesmo que os clientes RustDesk esperam do
+            // servidor quando enviam um token: o servidor oferece uma chave efêmera assinada com a chave
+            // do servidor; se o cliente responder com KeyExchange, o canal passa a ser cifrado
+            // (secretbox). Clientes que não respondem seguem em texto claro, como no upstream.
+            let our_sk_b = self.offer_key_exchange(&mut framed).await;
+            let (a, mut b) = framed.split();
+            sink = Some(Sink::TcpStream(a, None));
+            let mut dec: Option<Encrypt> = None;
+            let mut first = our_sk_b.is_some();
+            while let Ok(Some(Ok(mut bytes))) = timeout(30_000, b.next()).await {
+                if let Some(dec) = dec.as_mut() {
+                    if let Err(err) = dec.dec(&mut bytes) {
+                        log::warn!("secure tcp: falha ao decifrar mensagem de {}: {}", addr, err);
+                        break;
+                    }
+                } else if first {
+                    first = false;
+                    if let Some(sk_b) = our_sk_b.as_ref() {
+                        match Self::accept_key_exchange(&bytes, sk_b) {
+                            Ok(Some(key)) => {
+                                dec = Some(Encrypt::new(key.clone()));
+                                if let Some(Sink::TcpStream(_, enc)) = sink.as_mut() {
+                                    *enc = Some(Encrypt::new(key));
+                                }
+                                log::debug!("secure tcp: canal cifrado com {}", addr);
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                log::warn!("secure tcp: handshake inválido de {}: {}", addr, err);
+                                break;
+                            }
+                        }
+                    }
+                }
                 if !self.handle_tcp(&bytes, &mut sink, addr, key, ws).await {
                     break;
                 }
@@ -1216,6 +1254,51 @@ impl RendezvousServer {
         }
         log::debug!("Tcp connection from {:?} closed", addr);
         Ok(())
+    }
+
+    /// OLUNE: oferece o handshake "secure tcp" ao cliente recém-conectado (chave efêmera assinada
+    /// com a chave do servidor). Devolve a chave secreta efêmera para concluir a troca; `None`
+    /// quando o servidor não tem chave privada (`-k` vazio) ou o envio falhou.
+    async fn offer_key_exchange(
+        &self,
+        framed: &mut Framed<TcpStream, BytesCodec>,
+    ) -> Option<box_::SecretKey> {
+        let sk = self.inner.sk.as_ref()?;
+        let (pk_b, sk_b) = box_::gen_keypair();
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_key_exchange(KeyExchange {
+            keys: vec![sign::sign(&pk_b.0, sk).into()],
+            ..Default::default()
+        });
+        let bytes = msg_out.write_to_bytes().ok()?;
+        match framed.send(Bytes::from(bytes)).await {
+            Ok(()) => Some(sk_b),
+            Err(err) => {
+                log::debug!("secure tcp: falha ao enviar KeyExchange: {}", err);
+                None
+            }
+        }
+    }
+
+    /// OLUNE: conclui o handshake se a primeira mensagem do cliente for a resposta KeyExchange
+    /// (chave pública efêmera do cliente + chave simétrica selada). Devolve `Ok(None)` quando a
+    /// mensagem é outra qualquer (cliente em texto claro).
+    fn accept_key_exchange(
+        bytes: &[u8],
+        our_sk_b: &box_::SecretKey,
+    ) -> ResultType<Option<secretbox::Key>> {
+        let msg_in = match RendezvousMessage::parse_from_bytes(bytes) {
+            Ok(m) => m,
+            Err(_) => return Ok(None),
+        };
+        let ex = match msg_in.union {
+            Some(rendezvous_message::Union::KeyExchange(ex)) => ex,
+            _ => return Ok(None),
+        };
+        if ex.keys.len() != 2 {
+            bail!("KeyExchange com {} chave(s), esperado 2", ex.keys.len());
+        }
+        Ok(Some(Encrypt::decode(&ex.keys[1], &ex.keys[0], our_sk_b)?))
     }
 
     #[inline]
