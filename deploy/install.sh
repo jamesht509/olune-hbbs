@@ -17,7 +17,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 echo "== pacotes"
 apt-get update -qq
-apt-get install -y -qq caddy python3 curl ca-certificates >/dev/null
+apt-get install -y -qq python3 curl ca-certificates debian-keyring debian-archive-keyring apt-transport-https gnupg >/dev/null
+# Caddy não está nos repositórios padrão do Ubuntu: adiciona o repositório oficial (cloudsmith).
+if ! command -v caddy >/dev/null 2>&1; then
+  curl -1fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy-stable.list
+  apt-get update -qq
+  apt-get install -y -qq caddy >/dev/null
+fi
 
 echo "== binarios $TAG"
 TMP=$(mktemp -d); cd "$TMP"
